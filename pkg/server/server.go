@@ -174,7 +174,6 @@ type BgpServer struct {
 	bmpManager   *bmpClientManager
 	mrtManager   *mrtManager
 	roaTable     *table.ROATable
-	uuidMap      map[string]uuid.UUID
 	logger       log.Logger
 }
 
@@ -195,7 +194,6 @@ func NewBgpServer(opt ...ServerOption) *BgpServer {
 		policy:       table.NewRoutingPolicy(logger),
 		mgmtCh:       make(chan *mgmtOp, 1),
 		watcherMap:   make(map[watchEventType][]*watcher),
-		uuidMap:      make(map[string]uuid.UUID),
 		roaManager:   newROAManager(roaTable, logger),
 		roaTable:     roaTable,
 		logger:       logger,
@@ -2131,6 +2129,7 @@ func (s *BgpServer) AddPath(ctx context.Context, r *api.AddPathRequest) (*api.Ad
 	var uuidBytes []byte
 	err := s.mgmtOperation(func() error {
 		id, err := uuid.NewRandom()
+
 		if err != nil {
 			return err
 		}
@@ -2139,13 +2138,15 @@ func (s *BgpServer) AddPath(ctx context.Context, r *api.AddPathRequest) (*api.Ad
 		if err != nil {
 			return err
 		}
+
+		path.Uuid = &id
+
 		err = s.addPathList(r.VrfId, []*table.Path{path})
 		if err != nil {
 			return err
 		}
 
-		s.uuidMap[pathTokey(path)] = id
-		uuidBytes, _ = id.MarshalBinary()
+		uuidBytes, _ = path.Uuid.MarshalBinary()
 		return nil
 	}, true)
 	return &api.AddPathResponse{Uuid: uuidBytes}, err
@@ -2172,15 +2173,9 @@ func (s *BgpServer) DeletePath(ctx context.Context, r *api.DeletePathRequest) er
 		if len(r.Uuid) > 0 {
 			// Delete locally generated path which has the given UUID
 			path := func() *table.Path {
-				id, _ := uuid.FromBytes(r.Uuid)
-				for k, v := range s.uuidMap {
-					if v == id {
-						for _, path := range s.globalRib.GetPathList(table.GLOBAL_RIB_NAME, 0, s.globalRib.GetRFlist()) {
-							if path.IsLocal() && k == pathTokey(path) {
-								delete(s.uuidMap, k)
-								return path
-							}
-						}
+				for _, path := range s.globalRib.GetPathList(table.GLOBAL_RIB_NAME, 0, s.globalRib.GetRFlist()) {
+					if path.Uuid != nil && bytes.Equal(path.Uuid[:], r.Uuid) {
+						return path
 					}
 				}
 				return nil
@@ -2201,15 +2196,11 @@ func (s *BgpServer) DeletePath(ctx context.Context, r *api.DeletePathRequest) er
 					deletePathList = append(deletePathList, path.Clone(true))
 				}
 			}
-			s.uuidMap = make(map[string]uuid.UUID)
 		} else {
 			if err := s.fixupApiPath(r.VrfId, pathList); err != nil {
 				return err
 			}
 			deletePathList = pathList
-			for _, p := range deletePathList {
-				delete(s.uuidMap, pathTokey(p))
-			}
 		}
 		s.propagateUpdate(nil, deletePathList)
 		return nil
@@ -2677,7 +2668,7 @@ func (s *BgpServer) ListPath(ctx context.Context, r *api.ListPathRequest, fn fun
 			}
 			knownPathList := dst.GetAllKnownPathList()
 			for i, path := range knownPathList {
-				p := toPathApi(path, getValidation(v, path), r.EnableNlriBinary, r.EnableAttributeBinary)
+				p := toPathApi(path, getValidation(v, path), r.EnableOnlyBinary, r.EnableNlriBinary, r.EnableAttributeBinary)
 				if !table.SelectionOptions.DisableBestPathSelection {
 					if i == 0 {
 						switch r.TableType {
@@ -4035,7 +4026,7 @@ func (s *BgpServer) WatchEvent(ctx context.Context, r *api.WatchEventRequest, fn
 				case *watchEventUpdate:
 					paths := make([]*api.Path, 0)
 					for _, path := range msg.PathList {
-						paths = append(paths, toPathApi(path, nil, false, false))
+						paths = append(paths, toPathApi(path, nil, false, false, false))
 					}
 
 					fn(&api.WatchEventResponse{
@@ -4053,11 +4044,11 @@ func (s *BgpServer) WatchEvent(ctx context.Context, r *api.WatchEventRequest, fn
 							l = append(l, p...)
 						}
 						for _, p := range l {
-							pl = append(pl, toPathApi(p, nil, false, false))
+							pl = append(pl, toPathApi(p, nil, false, false, false))
 						}
 					} else {
 						for _, p := range msg.PathList {
-							pl = append(pl, toPathApi(p, nil, false, false))
+							pl = append(pl, toPathApi(p, nil, false, false, false))
 						}
 					}
 					fn(&api.WatchEventResponse{
